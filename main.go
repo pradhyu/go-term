@@ -236,6 +236,9 @@ func main() {
 
 		switch ch {
 		case '\t': // Tab key
+			// Clear any dropdown completion menu first
+			term.ClearCompletions()
+			
 			// Accept current suggestion if there is one
 			if suggestion := term.AcceptSuggestion(); suggestion != "" {
 				// Clear current input
@@ -257,11 +260,14 @@ func main() {
 				// Get current input
 				currentInput := cmdBuffer.String()
 				
+				// Clear any existing dropdown first
+				term.ClearCompletions()
+				
 				// Get completions
 				term.currentSuggestions = term.GetCompletions(currentInput)
 				
 				if len(term.currentSuggestions) > 0 {
-					// Show all completions
+					// Show all completions in dropdown menu
 					term.ShowCompletions()
 					
 					// Reprint prompt and current input
@@ -276,6 +282,9 @@ func main() {
 			}
 
 		case '\r', '\n': // Enter key
+			// Clear any dropdown completion menu
+			term.ClearCompletions()
+			
 			cmd := cmdBuffer.String()
 			term.WriteLine("") // New line after command
 
@@ -322,6 +331,9 @@ func main() {
 			}
 			fmt.Print(prompt)
 		case 127, 8: // Backspace
+			// Clear any dropdown completion menu
+			term.ClearCompletions()
+			
 			if cmdBuffer.Len() > 0 {
 				// Remove last character from buffer and terminal
 				s := cmdBuffer.String()
@@ -340,6 +352,20 @@ func main() {
 				// Echo character
 				fmt.Printf("%c", ch)
 				cmdBuffer.WriteByte(ch)
+
+				// Get current input for completions
+				currentInput := cmdBuffer.String()
+				
+				// Clear any existing dropdown first
+				term.ClearCompletions()
+				
+				// Get completions for dropdown menu
+				term.currentSuggestions = term.GetCompletions(currentInput)
+				
+				// Show dropdown completion menu with yellow background if we have suggestions
+				if len(term.currentSuggestions) > 0 {
+					term.ShowCompletions()
+				}
 
 				// Show inline suggestion
 				if err := term.ShowInlineSuggestion(cmdBuffer.String()); err != nil {

@@ -219,8 +219,20 @@ const (
 
 // ShowInlineSuggestion displays the current suggestion in green
 func (t *Terminal) ShowInlineSuggestion(input string) error {
-	// Get completions for current input
+	// Get unique completions for current input
 	completions := t.GetCompletions(input)
+	
+	// Deduplicate completions
+	seen := make(map[string]bool)
+	unique := make([]string, 0)
+	for _, comp := range completions {
+		if !seen[comp] {
+			seen[comp] = true
+			unique = append(unique, comp)
+		}
+	}
+	completions = unique
+	
 	if len(completions) == 0 {
 		// Clear any existing suggestion
 		t.currentSuggestion = ""
@@ -228,10 +240,12 @@ func (t *Terminal) ShowInlineSuggestion(input string) error {
 		return err
 	}
 
-	// Find the best completion (first one that starts with current input)
+	// Find the best completion (first unique one that starts with current input)
 	var suggestion string
+	seenSuggestions := make(map[string]bool)
 	for _, comp := range completions {
-		if strings.HasPrefix(strings.ToLower(comp), strings.ToLower(input)) {
+		if strings.HasPrefix(strings.ToLower(comp), strings.ToLower(input)) && !seenSuggestions[comp] {
+			seenSuggestions[comp] = true
 			suggestion = comp
 			break
 		}
@@ -247,9 +261,33 @@ func (t *Terminal) ShowInlineSuggestion(input string) error {
 	// Store the current suggestion
 	t.currentSuggestion = suggestion
 
+	// Save cursor position
+	_, err := t.writer.WriteString("\033[s")
+	if err != nil {
+		return err
+	}
+
+	// Move to rightmost position (column 60)
+	_, err = t.writer.WriteString("\033[60G")
+	if err != nil {
+		return err
+	}
+
+	// Write the full suggestion at rightmost position
+	_, err = t.writer.WriteString("[" + greenColor + suggestion + resetColor + "]" + clearToEndLine)
+	if err != nil {
+		return err
+	}
+
+	// Restore cursor position
+	_, err = t.writer.WriteString("\033[u")
+	if err != nil {
+		return err
+	}
+
 	// Show the suggestion in green, starting from where the user input ends
 	suffixPart := suggestion[len(input):]
-	_, err := t.writer.WriteString(greenColor + suffixPart + resetColor + clearToEndLine)
+	_, err = t.writer.WriteString(greenColor + suffixPart + resetColor + clearToEndLine)
 	
 	// Move cursor back to end of user input
 	if err == nil {
@@ -266,10 +304,35 @@ func (t *Terminal) AcceptSuggestion() string {
 
 // GetCompletions returns possible completions for the current input
 func (t *Terminal) GetCompletions(input string) []string {
+	// If input is empty, show unique history items
+	if input == "" {
+		// Return unique recent history items (up to 3)
+		var historyItems []string
+		seenHistory := make(map[string]bool)
+		for i := len(t.history) - 1; i >= 0 && len(historyItems) < 3; i-- {
+			cmd := t.history[i]
+			if !seenHistory[cmd] {
+				seenHistory[cmd] = true
+				historyItems = append(historyItems, "HIST: " + cmd)
+			}
+		}
+		return historyItems
+	}
+
+	// Check if input matches any unique history items (up to 3)
+	seen := make(map[string]bool)
+	historyMatches := []string{}
+	for i := len(t.history) - 1; i >= 0 && len(historyMatches) < 3; i-- {
+		if strings.HasPrefix(strings.ToLower(t.history[i]), strings.ToLower(input)) && !seen[t.history[i]] {
+			seen[t.history[i]] = true
+			historyMatches = append(historyMatches, t.history[i])
+		}
+	}
+
 	// Split input into command and current argument
 	parts := strings.Fields(input)
 	if len(parts) == 0 {
-		return nil
+		return historyMatches
 	}
 
 	// If we're completing the command itself
@@ -308,6 +371,31 @@ func (t *Terminal) GetCompletions(input string) []string {
 			result = append(result, cmd)
 		}
 		sort.Strings(result)
+		
+		// Get unique history matches and add prefix
+		seen := make(map[string]bool)
+		historyMatches := []string{}
+		for i := len(t.history) - 1; i >= 0 && len(historyMatches) < 3; i-- {
+			cmd := t.history[i]
+			if strings.HasPrefix(strings.ToLower(cmd), strings.ToLower(parts[0])) && !seen[cmd] {
+				seen[cmd] = true
+				historyMatches = append(historyMatches, "HIST: " + cmd)
+			}
+		}
+		
+		// Combine history with unique commands (limit to 3 commands)
+		if len(result) > 3 {
+			result = result[:3]
+		}
+		if len(historyMatches) > 0 {
+			combined := append(historyMatches, result...)
+			return combined
+		}
+		
+		// If no history matches, limit regular completions to 6
+		if len(result) > 6 {
+			result = result[:6]
+		}
 		return result
 	}
 
@@ -342,11 +430,13 @@ func (t *Terminal) GetCompletions(input string) []string {
 			return nil
 		}
 
-		// Filter and format completions
+		// Filter and format unique completions
+		seen := make(map[string]bool)
 		var completions []string
 		for _, file := range files {
 			name := file.Name()
-			if strings.HasPrefix(name, searchPrefix) {
+			if strings.HasPrefix(name, searchPrefix) && !seen[name] {
+				seen[name] = true
 				if file.IsDir() {
 					name += "/"
 				}
@@ -355,48 +445,156 @@ func (t *Terminal) GetCompletions(input string) []string {
 		}
 
 		sort.Strings(completions)
+		
+		// Check if any unique history items match the current path
+		var historyMatches []string
+		seenHistory := make(map[string]bool)
+		for i := len(t.history) - 1; i >= 0 && len(historyMatches) < 3; i-- {
+			cmd := t.history[i]
+			if strings.Contains(cmd, currentArg) && !seenHistory[cmd] {
+				seenHistory[cmd] = true
+				historyMatches = append(historyMatches, "HIST: " + cmd)
+			}
+		}
+
+		// Limit completions to 3 if we have history matches
+		if len(historyMatches) > 0 && len(completions) > 3 {
+			completions = completions[:3]
+		} else if len(completions) > 6 { // Otherwise limit to 6
+			completions = completions[:6]
+		}
+		
+		// Combine history with file completions
+		if len(historyMatches) > 0 {
+			combined := append(historyMatches, completions...)
+			return combined
+		}
+		
 		return completions
 	}
 
 	return nil
 }
 
-// ShowCompletions displays the current completion suggestions
-func (t *Terminal) ShowCompletions() error {
-	if len(t.currentSuggestions) == 0 {
-		return nil
-	}
+// ANSI color codes
+const (
+	YellowBg = "\033[43m" // Yellow background
+	BlackFg  = "\033[30m" // Black foreground
+	GreenBg  = "\033[42m" // Green background
+	BlueBg   = "\033[44m" // Blue background for history items
+	Reset    = "\033[0m"  // Reset formatting
+)
 
-	// Clear previous line and move cursor to start
-	_, err := t.writer.WriteString("\r\n")
+// ClearCompletions clears the dropdown completion menu
+func (t *Terminal) ClearCompletions() error {
+	// Save cursor position
+	_, err := t.writer.WriteString("\033[s")
 	if err != nil {
 		return err
 	}
 
-	// Show completions in columns
-	maxWidth := 20
-	cols := 80 / (maxWidth + 2)
-	for i, suggestion := range t.currentSuggestions {
-		if i > 0 && i % cols == 0 {
-			_, err = t.writer.WriteString("\r\n")
-			if err != nil {
-				return err
-			}
-		}
-		// Pad suggestion to fixed width
-		padded := suggestion
-		if len(padded) > maxWidth {
-			padded = padded[:maxWidth-3] + "..."
-		} else {
-			padded = padded + strings.Repeat(" ", maxWidth-len(padded))
-		}
-		_, err = t.writer.WriteString(padded + "  ")
+	// Move cursor down one line
+	_, err = t.writer.WriteString("\r\n")
+	if err != nil {
+		return err
+	}
+
+	// Clear several lines below (enough to cover the dropdown)
+	for i := 0; i < 12; i++ {
+		_, err = t.writer.WriteString("\033[K\r\n")
 		if err != nil {
 			return err
 		}
 	}
 
+	// Restore cursor position
+	_, err = t.writer.WriteString("\033[u")
+	if err != nil {
+		return err
+	}
+
+	return t.writer.Flush()
+}
+
+// ShowCompletions displays the current completion suggestions in a dropdown with yellow background
+func (t *Terminal) ShowCompletions() error {
+	// First clear any existing dropdown
+	if err := t.ClearCompletions(); err != nil {
+		return err
+	}
+
+	if len(t.currentSuggestions) == 0 {
+		return nil
+	}
+
+	// Save cursor position
+	_, err := t.writer.WriteString("\033[s")
+	if err != nil {
+		return err
+	}
+
+	// Move cursor down one line to create space for dropdown
 	_, err = t.writer.WriteString("\r\n")
+	if err != nil {
+		return err
+	}
+
+	// Draw dropdown box with yellow background
+	maxWidth := 25
+	maxItems := 8 // Maximum number of items to show in dropdown
+
+	// Limit the number of suggestions shown
+	shownSuggestions := t.currentSuggestions
+	if len(shownSuggestions) > maxItems {
+		shownSuggestions = shownSuggestions[:maxItems]
+	}
+
+	// Draw top border
+	_, err = t.writer.WriteString("┌" + strings.Repeat("─", maxWidth) + "┐\r\n")
+	if err != nil {
+		return err
+	}
+
+	// First suggestion will be highlighted in green
+
+	// Draw suggestions
+	for i, suggestion := range shownSuggestions {
+		// Pad suggestion to fixed width
+		padded := suggestion
+		if len(padded) > maxWidth-2 {
+			padded = padded[:maxWidth-5] + "..."
+		} else {
+			padded = padded + strings.Repeat(" ", maxWidth-2-len(padded))
+		}
+
+		// Determine background color based on type and position
+		background := YellowBg
+		
+		// Use green for the first item (closest match)
+		if i == 0 {
+			background = GreenBg
+		}
+		
+		// Use blue background for history items
+		if strings.HasPrefix(suggestion, "HIST: ") {
+			background = BlueBg
+		}
+
+		// Write with colored background and black text
+		_, err = t.writer.WriteString("│" + background + BlackFg + padded + Reset + "│\r\n")
+		if err != nil {
+			return err
+		}
+	}
+
+	// Draw bottom border
+	_, err = t.writer.WriteString("└" + strings.Repeat("─", maxWidth) + "┘")
+	if err != nil {
+		return err
+	}
+
+	// Restore cursor position
+	_, err = t.writer.WriteString("\033[u")
 	if err != nil {
 		return err
 	}
