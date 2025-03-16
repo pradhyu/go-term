@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"github.com/pkg/term"
 )
@@ -34,6 +35,7 @@ type Terminal struct {
 	writer *bufio.Writer
 	currentSuggestions []string
 	suggestionIndex int
+	selectedIndex int
 	history []string
 	historyIndex int
 	historyFile string
@@ -302,19 +304,54 @@ func (t *Terminal) AcceptSuggestion() string {
 	return t.currentSuggestion
 }
 
+// SelectNextCompletion moves the selection to the next completion item
+func (t *Terminal) SelectNextCompletion() {
+	if len(t.currentSuggestions) > 0 {
+		t.selectedIndex = (t.selectedIndex + 1) % len(t.currentSuggestions)
+		t.ShowCompletions()
+	}
+}
+
+// SelectPreviousCompletion moves the selection to the previous completion item
+func (t *Terminal) SelectPreviousCompletion() {
+	if len(t.currentSuggestions) > 0 {
+		t.selectedIndex = (t.selectedIndex - 1 + len(t.currentSuggestions)) % len(t.currentSuggestions)
+		t.ShowCompletions()
+	}
+}
+
+// GetSelectedCompletion returns the currently selected completion
+func (t *Terminal) GetSelectedCompletion() string {
+	if len(t.currentSuggestions) > 0 && t.selectedIndex >= 0 && t.selectedIndex < len(t.currentSuggestions) {
+		suggestion := t.currentSuggestions[t.selectedIndex]
+		// Remove HIST: prefix if present
+		if strings.HasPrefix(suggestion, "HIST: ") {
+			return suggestion[6:]
+		}
+		return suggestion
+	}
+	return ""
+}
+
 // GetCompletions returns possible completions for the current input
 func (t *Terminal) GetCompletions(input string) []string {
 	// If input is empty, show unique history items
 	if input == "" {
-		// Return unique recent history items (up to 3)
-		var historyItems []string
-		seenHistory := make(map[string]bool)
-		for i := len(t.history) - 1; i >= 0 && len(historyItems) < 3; i-- {
+		// Get unique recent history items (up to 3)
+		var uniqueHistory []string
+		var seenCommands = make(map[string]bool)
+		for i := len(t.history) - 1; i >= 0 && len(uniqueHistory) < 3; i-- {
 			cmd := t.history[i]
-			if !seenHistory[cmd] {
-				seenHistory[cmd] = true
-				historyItems = append(historyItems, "HIST: " + cmd)
+			if !seenCommands[cmd] {
+				seenCommands[cmd] = true
+				uniqueHistory = append(uniqueHistory, cmd)
 			}
+		}
+
+		// Add prefix to unique history matches
+		var historyItems = make([]string, len(uniqueHistory))
+		for i, cmd := range uniqueHistory {
+			historyItems[i] = "HIST: " + cmd
 		}
 		return historyItems
 	}
@@ -372,15 +409,21 @@ func (t *Terminal) GetCompletions(input string) []string {
 		}
 		sort.Strings(result)
 		
-		// Get unique history matches and add prefix
-		seen := make(map[string]bool)
-		historyMatches := []string{}
-		for i := len(t.history) - 1; i >= 0 && len(historyMatches) < 3; i-- {
+			// Get unique history matches
+		var uniqueHistory []string
+		var seenHistory = make(map[string]bool)
+		for i := len(t.history) - 1; i >= 0 && len(uniqueHistory) < 3; i-- {
 			cmd := t.history[i]
-			if strings.HasPrefix(strings.ToLower(cmd), strings.ToLower(parts[0])) && !seen[cmd] {
-				seen[cmd] = true
-				historyMatches = append(historyMatches, "HIST: " + cmd)
+			if strings.HasPrefix(strings.ToLower(cmd), strings.ToLower(parts[0])) && !seenHistory[cmd] {
+				seenHistory[cmd] = true
+				uniqueHistory = append(uniqueHistory, cmd)
 			}
+		}
+
+		// Add prefix to unique history matches
+		var historyMatches = make([]string, len(uniqueHistory))
+		for i, cmd := range uniqueHistory {
+			historyMatches[i] = "HIST: " + cmd
 		}
 		
 		// Combine history with unique commands (limit to 3 commands)
@@ -447,14 +490,20 @@ func (t *Terminal) GetCompletions(input string) []string {
 		sort.Strings(completions)
 		
 		// Check if any unique history items match the current path
-		var historyMatches []string
-		seenHistory := make(map[string]bool)
-		for i := len(t.history) - 1; i >= 0 && len(historyMatches) < 3; i-- {
+		var uniqueHistory []string
+		var seenPaths = make(map[string]bool)
+		for i := len(t.history) - 1; i >= 0 && len(uniqueHistory) < 3; i-- {
 			cmd := t.history[i]
-			if strings.Contains(cmd, currentArg) && !seenHistory[cmd] {
-				seenHistory[cmd] = true
-				historyMatches = append(historyMatches, "HIST: " + cmd)
+			if strings.Contains(cmd, currentArg) && !seenPaths[cmd] {
+				seenPaths[cmd] = true
+				uniqueHistory = append(uniqueHistory, cmd)
 			}
+		}
+
+		// Add prefix to unique history matches
+		var historyMatches = make([]string, len(uniqueHistory))
+		for i, cmd := range uniqueHistory {
+			historyMatches[i] = "HIST: " + cmd
 		}
 
 		// Limit completions to 3 if we have history matches
@@ -527,21 +576,26 @@ func (t *Terminal) ShowCompletions() error {
 		return nil
 	}
 
-	// Save cursor position
-	_, err := t.writer.WriteString("\033[s")
+	// Get terminal width
+	cmd := exec.Command("tput", "cols")
+	output, err := cmd.Output()
 	if err != nil {
 		return err
 	}
+	termWidth, err := strconv.Atoi(strings.TrimSpace(string(output)))
+	if err != nil {
+		termWidth = 80 // fallback width
+	}
 
-	// Move cursor down one line to create space for dropdown
-	_, err = t.writer.WriteString("\r\n")
+	// Save cursor position
+	_, err = t.writer.WriteString("\033[s")
 	if err != nil {
 		return err
 	}
 
 	// Draw dropdown box with yellow background
 	maxWidth := 25
-	maxItems := 8 // Maximum number of items to show in dropdown
+	maxItems := 6 // Maximum number of items to show in dropdown
 
 	// Limit the number of suggestions shown
 	shownSuggestions := t.currentSuggestions
@@ -549,7 +603,14 @@ func (t *Terminal) ShowCompletions() error {
 		shownSuggestions = shownSuggestions[:maxItems]
 	}
 
-	// Draw top border
+	// Calculate rightmost position
+	rightPos := termWidth - maxWidth - 2 // -2 for box borders
+
+	// Draw top border at rightmost position
+	_, err = t.writer.WriteString(fmt.Sprintf("\033[%dG", rightPos))
+	if err != nil {
+		return err
+	}
 	_, err = t.writer.WriteString("┌" + strings.Repeat("─", maxWidth) + "┐\r\n")
 	if err != nil {
 		return err
@@ -559,6 +620,12 @@ func (t *Terminal) ShowCompletions() error {
 
 	// Draw suggestions
 	for i, suggestion := range shownSuggestions {
+		// Move to rightmost position
+		_, err = t.writer.WriteString(fmt.Sprintf("\033[%dG", rightPos))
+		if err != nil {
+			return err
+		}
+
 		// Pad suggestion to fixed width
 		padded := suggestion
 		if len(padded) > maxWidth-2 {
@@ -570,14 +637,18 @@ func (t *Terminal) ShowCompletions() error {
 		// Determine background color based on type and position
 		background := YellowBg
 		
-		// Use green for the first item (closest match)
-		if i == 0 {
+		// Use green for selected item
+		if i == t.selectedIndex {
 			background = GreenBg
 		}
 		
 		// Use blue background for history items
 		if strings.HasPrefix(suggestion, "HIST: ") {
-			background = BlueBg
+			if i == t.selectedIndex {
+				background = "\033[44m" // Bright blue for selected history
+			} else {
+				background = BlueBg
+			}
 		}
 
 		// Write with colored background and black text
@@ -587,7 +658,11 @@ func (t *Terminal) ShowCompletions() error {
 		}
 	}
 
-	// Draw bottom border
+	// Move to rightmost position and draw bottom border
+	_, err = t.writer.WriteString(fmt.Sprintf("\033[%dG", rightPos))
+	if err != nil {
+		return err
+	}
 	_, err = t.writer.WriteString("└" + strings.Repeat("─", maxWidth) + "┘")
 	if err != nil {
 		return err

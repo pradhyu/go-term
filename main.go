@@ -3,19 +3,34 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 )
 
 func main() {
+	// Set up signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
 	term, err := NewTerminal()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating terminal: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Handle Ctrl+C gracefully
+	go func() {
+		<-sigChan
+		fmt.Print("\n") // Move to new line
+		term.Close()
+		os.Exit(0)
+	}()
+
 	defer term.Close()
 
 	term.Clear()
-	term.WriteLine("Go Terminal REPL (type 'help' for commands, 'exit' to quit)")
+	term.WriteLine("Go Terminal REPL (type 'help' for commands, 'exit' to quit, or press Ctrl+C)")
 	term.WriteLine("")
 
 	var cmdBuffer strings.Builder
@@ -236,43 +251,37 @@ func main() {
 
 		switch ch {
 		case '\t': // Tab key
-			// Clear any dropdown completion menu first
-			term.ClearCompletions()
-			
-			// Accept current suggestion if there is one
-			if suggestion := term.AcceptSuggestion(); suggestion != "" {
-				// Clear current input
-				currentInput := cmdBuffer.String()
-				for i := 0; i < len(currentInput); i++ {
-					fmt.Print("\b \b")
-				}
+			if len(term.currentSuggestions) > 0 {
+				// If we have suggestions, accept the selected one
+				if selected := term.GetSelectedCompletion(); selected != "" {
+					// Clear current input
+					clearLine(prompt + cmdBuffer.String())
 
-				// If we're completing a command, add a space
-				if !strings.Contains(suggestion, " ") {
-					suggestion += " "
-				}
+					// If we're completing a command, add a space
+					if !strings.Contains(selected, " ") {
+						selected += " "
+					}
 
-				// Update buffer and display
-				cmdBuffer.Reset()
-				cmdBuffer.WriteString(suggestion)
-				fmt.Print(suggestion)
+					// Update buffer and display
+					cmdBuffer.Reset()
+					cmdBuffer.WriteString(selected)
+					fmt.Print(prompt + selected)
+					term.ClearCompletions()
+				}
 			} else {
 				// Get current input
 				currentInput := cmdBuffer.String()
-				
-				// Clear any existing dropdown first
-				term.ClearCompletions()
 				
 				// Get completions
 				term.currentSuggestions = term.GetCompletions(currentInput)
 				
 				if len(term.currentSuggestions) > 0 {
-					// Show all completions in dropdown menu
+					// Show all completions in dropdown menu with first item selected
+					term.selectedIndex = 0
 					term.ShowCompletions()
 					
 					// Reprint prompt and current input
-					prompt, _ := term.GetPrompt()
-					fmt.Print(prompt, currentInput)
+					fmt.Print(prompt + currentInput)
 
 					// Show inline suggestion again
 					if err := term.ShowInlineSuggestion(currentInput); err != nil {
@@ -347,6 +356,48 @@ func main() {
 					fmt.Fprintf(os.Stderr, "Error showing suggestion: %v\n", err)
 				}
 			}
+		case 27: // ESC sequence
+			// Read [ character
+			if ch, err = term.ReadChar(); err != nil || ch != 91 {
+				continue
+			}
+
+			// Read actual arrow key
+			if ch, err = term.ReadChar(); err != nil {
+				continue
+			}
+
+			switch ch {
+			case 65: // Up arrow
+				if len(term.currentSuggestions) > 0 {
+					// Navigate completion menu
+					term.SelectPreviousCompletion()
+				} else {
+					// History navigation
+					handleUpArrow()
+				}
+			case 66: // Down arrow
+				if len(term.currentSuggestions) > 0 {
+					// Navigate completion menu
+					term.SelectNextCompletion()
+				} else {
+					// History navigation
+					handleDownArrow()
+				}
+			case 67: // Right arrow
+				if len(term.currentSuggestions) > 0 {
+					// Accept selected completion
+					if selected := term.GetSelectedCompletion(); selected != "" {
+						clearLine(prompt + cmdBuffer.String())
+						cmdBuffer.Reset()
+						cmdBuffer.WriteString(selected)
+						fmt.Print(prompt + selected)
+						term.ClearCompletions()
+					}
+				}
+			}
+			continue
+
 		default:
 			if ch >= 32 && ch < 127 { // Printable characters
 				// Echo character
@@ -364,6 +415,7 @@ func main() {
 				
 				// Show dropdown completion menu with yellow background if we have suggestions
 				if len(term.currentSuggestions) > 0 {
+					term.selectedIndex = 0 // Reset selection to first item
 					term.ShowCompletions()
 				}
 
