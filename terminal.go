@@ -7,6 +7,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
 	"github.com/pkg/term"
 )
 
@@ -18,12 +21,27 @@ type lineWriter struct {
 func (w *lineWriter) Write(p []byte) (n int, err error) {
 	// Convert any lone \n to \r\n
 	modified := bytes.ReplaceAll(p, []byte{'\n'}, []byte{'\r', '\n'})
-	return w.w.Write(modified)
+	n, err = w.w.Write(modified)
+	if err != nil {
+		// Silently handle write errors to prevent them from bubbling up to the user
+		return len(p), nil
+	}
+	return n, nil
 }
 
 type Terminal struct {
 	term *term.Term
 	writer *bufio.Writer
+	currentSuggestions []string
+	suggestionIndex int
+	history []string
+	historyIndex int
+	historyFile string
+	searchMode bool
+	searchQuery string
+	searchResults []string
+	searchIndex int
+	currentSuggestion string
 }
 
 // NewTerminal creates a new terminal wrapper
@@ -40,10 +58,20 @@ func NewTerminal() (*Terminal, error) {
 		return nil, fmt.Errorf("failed to set raw mode: %v", err)
 	}
 
-	return &Terminal{
+	// Create terminal instance
+	terminal := &Terminal{
 		term: t,
 		writer: bufio.NewWriter(os.Stdout),
-	}, nil
+		historyIndex: -1,
+		history: []string{},
+	}
+
+	// Load history
+	if err := terminal.loadHistory(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Could not load history: %v\n", err)
+	}
+
+	return terminal, nil
 }
 
 // Close closes the terminal
@@ -82,15 +110,480 @@ func (t *Terminal) WriteLine(s string) error {
 
 // ExecuteCommand executes a shell command
 func (t *Terminal) ExecuteCommand(command string, args ...string) error {
-	cmd := exec.Command(command, args...)
+	// Special handling for cd command
+	if command == "cd" {
+		var dir string
+		if len(args) == 0 {
+			// No args means cd to home directory
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("could not get home directory: %v", err)
+			}
+			dir = homeDir
+		} else {
+			dir = args[0]
+			// Handle ~ expansion
+			if strings.HasPrefix(dir, "~") {
+				homeDir, err := os.UserHomeDir()
+				if err != nil {
+					return fmt.Errorf("could not get home directory: %v", err)
+				}
+				dir = homeDir + dir[1:]
+			}
+		}
+		// Change directory
+		if err := os.Chdir(dir); err != nil {
+			return fmt.Errorf("could not change directory: %v", err)
+		}
+		return nil
+	}
+
+	// For all other commands
+	// Use the shell to handle environment variables
+	shellCmd := command
+	for _, arg := range args {
+		shellCmd += " " + arg
+	}
+	
+	// Use fish shell to execute the command with environment variable expansion
+	cmd := exec.Command("fish", "-c", shellCmd)
 	
 	// Use our custom writer for stdout
 	lw := &lineWriter{w: os.Stdout}
 	cmd.Stdout = lw
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = lw // Use the same line writer for stderr
 	cmd.Stdin = os.Stdin
 
-	return cmd.Run()
+	// Run the command and handle errors gracefully
+	err := cmd.Run()
+	if err != nil {
+		// Only return the error if it's not a write error
+		if !strings.Contains(err.Error(), "write") {
+			return err
+		}
+	}
+	return nil
+}
+
+// GetPrompt returns a formatted prompt string showing the current directory
+func (t *Terminal) GetPrompt() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "> ", err
+	}
+
+	// Get the current user's home directory
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = ""
+	}
+
+	// Replace home directory with ~
+	if home != "" && strings.HasPrefix(cwd, home) {
+		cwd = "~" + cwd[len(home):]
+	}
+
+	// Split the path into parts
+	parts := strings.Split(cwd, string(filepath.Separator))
+
+	// Start with just the last directory
+	result := parts[len(parts)-1]
+	maxLen := 20
+
+	// Add parent directories if there's room
+	for i := len(parts) - 2; i >= 0; i-- {
+		part := parts[i]
+		if part == "" {
+			part = "/"
+		}
+		testResult := part + string(filepath.Separator) + result
+		if len(testResult) > maxLen {
+			// If we can't fit the full parent, add ... and stop
+			if i > 0 {
+				result = "..." + string(filepath.Separator) + result
+			}
+			break
+		}
+		result = testResult
+	}
+
+	return result + "> ", nil
+}
+
+// ANSI color codes
+const (
+	greenColor = "\033[32m"
+	resetColor = "\033[0m"
+	clearToEndLine = "\033[K"
+)
+
+// ShowInlineSuggestion displays the current suggestion in green
+func (t *Terminal) ShowInlineSuggestion(input string) error {
+	// Get completions for current input
+	completions := t.GetCompletions(input)
+	if len(completions) == 0 {
+		// Clear any existing suggestion
+		t.currentSuggestion = ""
+		_, err := t.writer.WriteString(clearToEndLine)
+		return err
+	}
+
+	// Find the best completion (first one that starts with current input)
+	var suggestion string
+	for _, comp := range completions {
+		if strings.HasPrefix(strings.ToLower(comp), strings.ToLower(input)) {
+			suggestion = comp
+			break
+		}
+	}
+
+	if suggestion == "" {
+		// Clear any existing suggestion
+		t.currentSuggestion = ""
+		_, err := t.writer.WriteString(clearToEndLine)
+		return err
+	}
+
+	// Store the current suggestion
+	t.currentSuggestion = suggestion
+
+	// Show the suggestion in green, starting from where the user input ends
+	suffixPart := suggestion[len(input):]
+	_, err := t.writer.WriteString(greenColor + suffixPart + resetColor + clearToEndLine)
+	
+	// Move cursor back to end of user input
+	if err == nil {
+		_, err = t.writer.WriteString(strings.Repeat("\b", len(suffixPart)))
+	}
+
+	return t.writer.Flush()
+}
+
+// AcceptSuggestion accepts the current suggestion
+func (t *Terminal) AcceptSuggestion() string {
+	return t.currentSuggestion
+}
+
+// GetCompletions returns possible completions for the current input
+func (t *Terminal) GetCompletions(input string) []string {
+	// Split input into command and current argument
+	parts := strings.Fields(input)
+	if len(parts) == 0 {
+		return nil
+	}
+
+	// If we're completing the command itself
+	if len(parts) == 1 && !strings.Contains(input, " ") {
+		// Get PATH directories
+		pathDirs := strings.Split(os.Getenv("PATH"), ":")
+		
+		// Add built-in commands
+		builtins := []string{"cd", "clear", "exit", "help", "quit"}
+		completions := make(map[string]bool)
+		
+		// Add matching built-ins
+		for _, cmd := range builtins {
+			if strings.HasPrefix(cmd, parts[0]) {
+				completions[cmd] = true
+			}
+		}
+
+		// Search PATH for executables
+		for _, dir := range pathDirs {
+			files, err := os.ReadDir(dir)
+			if err != nil {
+				continue
+			}
+			for _, file := range files {
+				name := file.Name()
+				if strings.HasPrefix(name, parts[0]) {
+					completions[name] = true
+				}
+			}
+		}
+
+		// Convert map to sorted slice
+		result := make([]string, 0, len(completions))
+		for cmd := range completions {
+			result = append(result, cmd)
+		}
+		sort.Strings(result)
+		return result
+	}
+
+	// If we're completing a path argument
+	if len(parts) > 0 {
+		currentArg := ""
+		if strings.HasSuffix(input, " ") {
+			currentArg = ""
+		} else {
+			currentArg = parts[len(parts)-1]
+		}
+
+		// Expand ~ in path
+		if strings.HasPrefix(currentArg, "~") {
+			homeDir, err := os.UserHomeDir()
+			if err == nil {
+				currentArg = homeDir + currentArg[1:]
+			}
+		}
+
+		// Get the directory to search in
+		searchDir := "."
+		searchPrefix := ""
+		if currentArg != "" {
+			searchDir = filepath.Dir(currentArg)
+			searchPrefix = filepath.Base(currentArg)
+		}
+
+		// Read directory contents
+		files, err := os.ReadDir(searchDir)
+		if err != nil {
+			return nil
+		}
+
+		// Filter and format completions
+		var completions []string
+		for _, file := range files {
+			name := file.Name()
+			if strings.HasPrefix(name, searchPrefix) {
+				if file.IsDir() {
+					name += "/"
+				}
+				completions = append(completions, name)
+			}
+		}
+
+		sort.Strings(completions)
+		return completions
+	}
+
+	return nil
+}
+
+// ShowCompletions displays the current completion suggestions
+func (t *Terminal) ShowCompletions() error {
+	if len(t.currentSuggestions) == 0 {
+		return nil
+	}
+
+	// Clear previous line and move cursor to start
+	_, err := t.writer.WriteString("\r\n")
+	if err != nil {
+		return err
+	}
+
+	// Show completions in columns
+	maxWidth := 20
+	cols := 80 / (maxWidth + 2)
+	for i, suggestion := range t.currentSuggestions {
+		if i > 0 && i % cols == 0 {
+			_, err = t.writer.WriteString("\r\n")
+			if err != nil {
+				return err
+			}
+		}
+		// Pad suggestion to fixed width
+		padded := suggestion
+		if len(padded) > maxWidth {
+			padded = padded[:maxWidth-3] + "..."
+		} else {
+			padded = padded + strings.Repeat(" ", maxWidth-len(padded))
+		}
+		_, err = t.writer.WriteString(padded + "  ")
+		if err != nil {
+			return err
+		}
+	}
+
+	_, err = t.writer.WriteString("\r\n")
+	if err != nil {
+		return err
+	}
+
+	return t.writer.Flush()
+}
+
+// AddToHistory adds a command to history and saves it
+func (t *Terminal) AddToHistory(cmd string) error {
+	// Don't add empty commands or duplicates of the last command
+	if cmd == "" || (len(t.history) > 0 && t.history[len(t.history)-1] == cmd) {
+		return nil
+	}
+
+	// Add to memory
+	t.history = append(t.history, cmd)
+
+	// Trim history to last 1000 commands
+	if len(t.history) > 1000 {
+		t.history = t.history[len(t.history)-1000:]
+	}
+
+	// Save to file
+	return t.saveHistory()
+}
+
+// GetPreviousHistory moves back in history
+func (t *Terminal) GetPreviousHistory() string {
+	if len(t.history) == 0 {
+		return ""
+	}
+
+	// First time pressing up arrow
+	if t.historyIndex == -1 {
+		t.historyIndex = len(t.history) - 1
+	} else if t.historyIndex > 0 {
+		// Move back in history
+		t.historyIndex--
+	}
+
+	return t.history[t.historyIndex]
+}
+
+// GetNextHistory moves forward in history
+func (t *Terminal) GetNextHistory() string {
+	if t.historyIndex == -1 || len(t.history) == 0 {
+		return ""
+	}
+
+	if t.historyIndex < len(t.history)-1 {
+		// Move forward in history
+		t.historyIndex++
+		return t.history[t.historyIndex]
+	} else {
+		// Reached the end of history
+		t.historyIndex = -1
+		return ""
+	}
+}
+
+// ResetHistoryIndex resets the history navigation index
+func (t *Terminal) ResetHistoryIndex() {
+	t.historyIndex = -1
+}
+
+// loadHistory loads command history from file
+func (t *Terminal) loadHistory() error {
+	// Create history directory if it doesn't exist
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("could not get home directory: %v", err)
+	}
+
+	// Set history file path
+	t.historyFile = filepath.Join(homeDir, ".go_term_history")
+
+	// Try to read existing history file
+	data, err := os.ReadFile(t.historyFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Create empty history file
+			if err := os.WriteFile(t.historyFile, []byte{}, 0600); err != nil {
+				return fmt.Errorf("could not create history file: %v", err)
+			}
+			// Initialize empty history
+			t.history = []string{}
+			return nil
+		}
+		return err
+	}
+
+	// Split by newlines and filter empty lines
+	t.history = []string{}
+	lines := strings.Split(string(data), "\n")
+	for _, cmd := range lines {
+		if cmd != "" {
+			t.history = append(t.history, cmd)
+		}
+	}
+
+	return nil
+}
+
+// saveHistory saves command history to file
+func (t *Terminal) saveHistory() error {
+	// Make sure we have a valid history file path
+	if t.historyFile == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("could not get home directory: %v", err)
+		}
+		t.historyFile = filepath.Join(homeDir, ".go_term_history")
+	}
+
+	// Join history with newlines and save
+	data := strings.Join(t.history, "\n")
+	return os.WriteFile(t.historyFile, []byte(data), 0600)
+}
+
+// StartHistorySearch enters history search mode
+func (t *Terminal) StartHistorySearch() {
+	t.searchMode = true
+	t.searchQuery = ""
+	t.searchResults = nil
+	t.searchIndex = -1
+}
+
+// ExitHistorySearch exits history search mode
+func (t *Terminal) ExitHistorySearch() {
+	t.searchMode = false
+	t.searchQuery = ""
+	t.searchResults = nil
+	t.searchIndex = -1
+}
+
+// IsInSearchMode returns whether we're in history search mode
+func (t *Terminal) IsInSearchMode() bool {
+	return t.searchMode
+}
+
+// UpdateHistorySearch updates the search results based on the current query
+func (t *Terminal) UpdateHistorySearch(query string) []string {
+	t.searchQuery = query
+	t.searchResults = nil
+	t.searchIndex = -1
+
+	// Search through history in reverse order
+	for i := len(t.history) - 1; i >= 0; i-- {
+		if strings.Contains(strings.ToLower(t.history[i]), strings.ToLower(query)) {
+			t.searchResults = append(t.searchResults, t.history[i])
+		}
+	}
+
+	if len(t.searchResults) > 0 {
+		t.searchIndex = 0
+		return []string{t.searchResults[0]}
+	}
+
+	return nil
+}
+
+// GetNextSearchResult moves to the next search result
+func (t *Terminal) GetNextSearchResult() string {
+	if len(t.searchResults) == 0 {
+		return ""
+	}
+
+	t.searchIndex = (t.searchIndex + 1) % len(t.searchResults)
+	return t.searchResults[t.searchIndex]
+}
+
+// GetPreviousSearchResult moves to the previous search result
+func (t *Terminal) GetPreviousSearchResult() string {
+	if len(t.searchResults) == 0 {
+		return ""
+	}
+
+	t.searchIndex--
+	if t.searchIndex < 0 {
+		t.searchIndex = len(t.searchResults) - 1
+	}
+	return t.searchResults[t.searchIndex]
+}
+
+// GetSearchPrompt returns the search prompt with current query
+func (t *Terminal) GetSearchPrompt() string {
+	return fmt.Sprintf("(reverse-i-search)`%s': ", t.searchQuery)
 }
 
 // Clear clears the terminal screen and resets cursor position
