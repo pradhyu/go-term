@@ -324,9 +324,12 @@ func (t *Terminal) SelectPreviousCompletion() {
 func (t *Terminal) GetSelectedCompletion() string {
 	if len(t.currentSuggestions) > 0 && t.selectedIndex >= 0 && t.selectedIndex < len(t.currentSuggestions) {
 		suggestion := t.currentSuggestions[t.selectedIndex]
-		// Remove HIST: prefix if present
-		if strings.HasPrefix(suggestion, "HIST: ") {
-			return suggestion[6:]
+		// Remove any prefix (HIST: or CMD:)
+		if strings.Contains(suggestion, ": ") {
+			parts := strings.SplitN(suggestion, ": ", 2)
+			if len(parts) == 2 {
+				return parts[1]
+			}
 		}
 		return suggestion
 	}
@@ -402,14 +405,14 @@ func (t *Terminal) GetCompletions(input string) []string {
 			}
 		}
 
-		// Convert map to sorted slice
+		// Convert map to sorted slice and add CMD: prefix
 		result := make([]string, 0, len(completions))
 		for cmd := range completions {
-			result = append(result, cmd)
+			result = append(result, "CMD: "+cmd)
 		}
 		sort.Strings(result)
 		
-			// Get unique history matches
+		// Get unique history matches
 		var uniqueHistory []string
 		var seenHistory = make(map[string]bool)
 		for i := len(t.history) - 1; i >= 0 && len(uniqueHistory) < 3; i-- {
@@ -483,7 +486,7 @@ func (t *Terminal) GetCompletions(input string) []string {
 				if file.IsDir() {
 					name += "/"
 				}
-				completions = append(completions, name)
+				completions = append(completions, "CMD: "+name)
 			}
 		}
 
