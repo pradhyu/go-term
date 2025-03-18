@@ -169,16 +169,16 @@ func main() {
 					// Update search query
 					newQuery := term.searchQuery[:len(term.searchQuery)-1]
 					results := term.UpdateHistorySearch(newQuery)
-					
+
 					// Clear current line
 					clearLine(term.GetSearchPrompt() + cmdBuffer.String())
-					
+
 					// Update command buffer if we have results
 					if len(results) > 0 {
 						cmdBuffer.Reset()
 						cmdBuffer.WriteString(results[0])
 					}
-					
+
 					// Show new prompt and command
 					fmt.Print(term.GetSearchPrompt() + cmdBuffer.String())
 				}
@@ -266,20 +266,32 @@ func main() {
 					cmdBuffer.Reset()
 					cmdBuffer.WriteString(selected)
 					fmt.Print(prompt + selected)
+
+					// Clear completions but get new ones if needed
 					term.ClearCompletions()
+
+					// Get new completions based on the accepted selection
+					currentInput := cmdBuffer.String()
+					term.currentSuggestions = term.GetCompletions(currentInput)
+
+					// Show new completions if available
+					if len(term.currentSuggestions) > 0 {
+						term.selectedIndex = 0 // Reset selection to first item
+						term.ShowCompletions()
+					}
 				}
 			} else {
 				// Get current input
 				currentInput := cmdBuffer.String()
-				
+
 				// Get completions
 				term.currentSuggestions = term.GetCompletions(currentInput)
-				
+
 				if len(term.currentSuggestions) > 0 {
 					// Show all completions in dropdown menu with first item selected
 					term.selectedIndex = 0
 					term.ShowCompletions()
-					
+
 					// Reprint prompt and current input
 					fmt.Print(prompt + currentInput)
 
@@ -293,7 +305,7 @@ func main() {
 		case '\r', '\n': // Enter key
 			// Clear any dropdown completion menu
 			term.ClearCompletions()
-			
+
 			cmd := cmdBuffer.String()
 			term.WriteLine("") // New line after command
 
@@ -342,7 +354,7 @@ func main() {
 		case 127, 8: // Backspace
 			// Clear any dropdown completion menu
 			term.ClearCompletions()
-			
+
 			if cmdBuffer.Len() > 0 {
 				// Remove last character from buffer and terminal
 				s := cmdBuffer.String()
@@ -362,26 +374,162 @@ func main() {
 				continue
 			}
 
-			// Read actual arrow key
+			// Read the next character
 			if ch, err = term.ReadChar(); err != nil {
+				continue
+			}
+
+			// Check for Ctrl+Up and Ctrl+Down key combinations
+			ctrlKey := false
+			ctrlUpDown := false
+
+			// Check for Ubuntu terminal's Ctrl+Up (ESC [ 5 A) and Ctrl+Down (ESC [ 5 B)
+			if ch == 53 { // '5' - this is the Ubuntu terminal's sequence for Ctrl+arrow
+				// Try to read the next character (A for Up, B for Down)
+				if finalCh, err := term.ReadChar(); err == nil {
+					if finalCh == 65 { // 'A' for Up
+						// Handle Ctrl+Up
+						ctrlKey = true
+						ctrlUpDown = true
+
+						// Get completions if not already visible
+						if len(term.currentSuggestions) == 0 {
+							currentInput := cmdBuffer.String()
+							term.currentSuggestions = term.GetCompletions(currentInput)
+							if len(term.currentSuggestions) > 0 {
+								term.selectedIndex = 0
+								term.ShowCompletions()
+							}
+						}
+
+						// Navigate up in the completion menu
+						if len(term.currentSuggestions) > 0 {
+							term.SelectPreviousCompletion()
+						}
+						continue
+					} else if finalCh == 66 { // 'B' for Down
+						// Handle Ctrl+Down
+						ctrlKey = true
+						ctrlUpDown = true
+
+						// Get completions if not already visible
+						if len(term.currentSuggestions) == 0 {
+							currentInput := cmdBuffer.String()
+							term.currentSuggestions = term.GetCompletions(currentInput)
+							if len(term.currentSuggestions) > 0 {
+								term.selectedIndex = 0
+								term.ShowCompletions()
+							}
+						}
+
+						// Navigate down in the completion menu
+						if len(term.currentSuggestions) > 0 {
+							term.SelectNextCompletion()
+						}
+						continue
+					}
+					ch = finalCh
+				}
+			}
+
+			// Also handle standard Ctrl+Up/Down sequence (ESC [ 1 ; 5 A/B)
+			if ch == 49 && !ctrlUpDown { // '1'
+				// Try to read the next characters in the sequence
+				var nextCh, modCh, finalCh byte
+				if nextCh, err = term.ReadChar(); err == nil && nextCh == 59 { // ';'
+					if modCh, err = term.ReadChar(); err == nil && modCh == 53 { // '5' for Ctrl
+						if finalCh, err = term.ReadChar(); err == nil {
+							if finalCh == 65 { // 'A' for Up
+								// Handle Ctrl+Up
+								ctrlKey = true
+								ctrlUpDown = true
+
+								// Get completions if not already visible
+								if len(term.currentSuggestions) == 0 {
+									currentInput := cmdBuffer.String()
+									term.currentSuggestions = term.GetCompletions(currentInput)
+									if len(term.currentSuggestions) > 0 {
+										term.selectedIndex = 0
+										term.ShowCompletions()
+									}
+								}
+
+								// Navigate up in the completion menu
+								if len(term.currentSuggestions) > 0 {
+									term.SelectPreviousCompletion()
+								}
+								continue
+							} else if finalCh == 66 { // 'B' for Down
+								// Handle Ctrl+Down
+								ctrlKey = true
+								ctrlUpDown = true
+
+								// Get completions if not already visible
+								if len(term.currentSuggestions) == 0 {
+									currentInput := cmdBuffer.String()
+									term.currentSuggestions = term.GetCompletions(currentInput)
+									if len(term.currentSuggestions) > 0 {
+										term.selectedIndex = 0
+										term.ShowCompletions()
+									}
+								}
+
+								// Navigate down in the completion menu
+								if len(term.currentSuggestions) > 0 {
+									term.SelectNextCompletion()
+								}
+								continue
+							}
+							ch = finalCh
+						}
+					}
+				}
+			}
+
+			// If we've already handled a Ctrl+Up/Down, skip the rest
+			if ctrlUpDown {
 				continue
 			}
 
 			switch ch {
 			case 65: // Up arrow
-				if len(term.currentSuggestions) > 0 {
-					// Navigate completion menu
-					term.SelectPreviousCompletion()
+				if ctrlKey || len(term.currentSuggestions) > 0 {
+					// For Ctrl+Up or if completion menu is visible, navigate completion menu
+					if len(term.currentSuggestions) == 0 {
+						// If no completions visible yet, get them first
+						currentInput := cmdBuffer.String()
+						term.currentSuggestions = term.GetCompletions(currentInput)
+						if len(term.currentSuggestions) > 0 {
+							term.selectedIndex = 0
+							term.ShowCompletions()
+						}
+					}
+
+					if len(term.currentSuggestions) > 0 {
+						term.SelectPreviousCompletion()
+					}
 				} else {
-					// History navigation
+					// Regular up arrow - history navigation
 					handleUpArrow()
 				}
 			case 66: // Down arrow
-				if len(term.currentSuggestions) > 0 {
-					// Navigate completion menu
-					term.SelectNextCompletion()
+				if ctrlKey || len(term.currentSuggestions) > 0 {
+					// For Ctrl+Down or if completion menu is visible, navigate completion menu
+					if len(term.currentSuggestions) == 0 {
+						// If no completions visible yet, get them first
+						currentInput := cmdBuffer.String()
+						term.currentSuggestions = term.GetCompletions(currentInput)
+						if len(term.currentSuggestions) > 0 {
+							term.selectedIndex = 0
+							term.ShowCompletions()
+						}
+					}
+
+					if len(term.currentSuggestions) > 0 {
+						term.SelectNextCompletion()
+					}
 				} else {
-					// History navigation
+					// Regular down arrow - history navigation
 					handleDownArrow()
 				}
 			case 67: // Right arrow
@@ -390,15 +538,81 @@ func main() {
 					if selected := term.GetSelectedCompletion(); selected != "" {
 						clearLine(prompt + cmdBuffer.String())
 						cmdBuffer.Reset()
+
+						// If we're completing a command, add a space
+						if !strings.Contains(selected, " ") {
+							selected += " "
+						}
+
 						cmdBuffer.WriteString(selected)
 						fmt.Print(prompt + selected)
+
+						// Clear completions but get new ones if needed
 						term.ClearCompletions()
+
+						// Get new completions based on the accepted selection
+						currentInput := cmdBuffer.String()
+						term.currentSuggestions = term.GetCompletions(currentInput)
+
+						// Show new completions if available
+						if len(term.currentSuggestions) > 0 {
+							term.selectedIndex = 0 // Reset selection to first item
+							term.ShowCompletions()
+						}
 					}
 				}
 			}
 			continue
 
 		default:
+			// Check for special key sequences that might be embedded in the input
+			inputStr := cmdBuffer.String()
+			if len(inputStr) >= 2 && (inputStr[len(inputStr)-2:] == "5A" || inputStr[len(inputStr)-2:] == "5B") {
+				// Get the last two characters
+				lastTwo := inputStr[len(inputStr)-2:]
+
+				// Remove the sequence from the buffer
+				cmdBuffer.Reset()
+				cmdBuffer.WriteString(inputStr[:len(inputStr)-2])
+
+				// Clear the characters from the screen
+				fmt.Print("\b\b  \b\b")
+
+				// Handle Ctrl+Up/Down
+				if lastTwo == "5A" { // Ctrl+Up
+					// Get completions if not already visible
+					if len(term.currentSuggestions) == 0 {
+						currentInput := cmdBuffer.String()
+						term.currentSuggestions = term.GetCompletions(currentInput)
+						if len(term.currentSuggestions) > 0 {
+							term.selectedIndex = 0
+							term.ShowCompletions()
+						}
+					}
+
+					// Navigate up in the completion menu
+					if len(term.currentSuggestions) > 0 {
+						term.SelectPreviousCompletion()
+					}
+				} else if lastTwo == "5B" { // Ctrl+Down
+					// Get completions if not already visible
+					if len(term.currentSuggestions) == 0 {
+						currentInput := cmdBuffer.String()
+						term.currentSuggestions = term.GetCompletions(currentInput)
+						if len(term.currentSuggestions) > 0 {
+							term.selectedIndex = 0
+							term.ShowCompletions()
+						}
+					}
+
+					// Navigate down in the completion menu
+					if len(term.currentSuggestions) > 0 {
+						term.SelectNextCompletion()
+					}
+				}
+				continue
+			}
+
 			if ch >= 32 && ch < 127 { // Printable characters
 				// Echo character
 				fmt.Printf("%c", ch)
@@ -406,13 +620,13 @@ func main() {
 
 				// Get current input for completions
 				currentInput := cmdBuffer.String()
-				
+
 				// Clear any existing dropdown first
 				term.ClearCompletions()
-				
+
 				// Get completions for dropdown menu
 				term.currentSuggestions = term.GetCompletions(currentInput)
-				
+
 				// Show dropdown completion menu with yellow background if we have suggestions
 				if len(term.currentSuggestions) > 0 {
 					term.selectedIndex = 0 // Reset selection to first item

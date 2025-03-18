@@ -307,7 +307,13 @@ func (t *Terminal) AcceptSuggestion() string {
 // SelectNextCompletion moves the selection to the next completion item
 func (t *Terminal) SelectNextCompletion() {
 	if len(t.currentSuggestions) > 0 {
+		// Clear the current completions first
+		t.ClearCompletions()
+		
+		// Update the selection index
 		t.selectedIndex = (t.selectedIndex + 1) % len(t.currentSuggestions)
+		
+		// Show the updated completions
 		t.ShowCompletions()
 	}
 }
@@ -315,7 +321,13 @@ func (t *Terminal) SelectNextCompletion() {
 // SelectPreviousCompletion moves the selection to the previous completion item
 func (t *Terminal) SelectPreviousCompletion() {
 	if len(t.currentSuggestions) > 0 {
+		// Clear the current completions first
+		t.ClearCompletions()
+		
+		// Update the selection index
 		t.selectedIndex = (t.selectedIndex - 1 + len(t.currentSuggestions)) % len(t.currentSuggestions)
+		
+		// Show the updated completions
 		t.ShowCompletions()
 	}
 }
@@ -614,7 +626,7 @@ func (t *Terminal) ShowCompletions() error {
 	if err != nil {
 		return err
 	}
-	_, err = t.writer.WriteString("┌" + strings.Repeat("─", maxWidth) + "┐\r\n")
+	_, err = t.writer.WriteString("┌" + strings.Repeat("─", maxWidth+1) + "┐\r\n") // +1 for arrow space
 	if err != nil {
 		return err
 	}
@@ -629,12 +641,12 @@ func (t *Terminal) ShowCompletions() error {
 			return err
 		}
 
-		// Pad suggestion to fixed width
+		// Pad suggestion to fixed width (account for arrow space)
 		padded := suggestion
-		if len(padded) > maxWidth-2 {
-			padded = padded[:maxWidth-5] + "..."
+		if len(padded) > maxWidth-3 { // -3 to account for arrow space
+			padded = padded[:maxWidth-6] + "..."
 		} else {
-			padded = padded + strings.Repeat(" ", maxWidth-2-len(padded))
+			padded = padded + strings.Repeat(" ", maxWidth-3-len(padded))
 		}
 
 		// Determine background color based on type and position
@@ -654,8 +666,14 @@ func (t *Terminal) ShowCompletions() error {
 			}
 		}
 
+		// Add arrow indicator for selected item
+		indicator := "  " // Two spaces for non-selected items
+		if i == t.selectedIndex {
+			indicator = "► " // Arrow with space for selected item
+		}
+
 		// Write with colored background and black text
-		_, err = t.writer.WriteString("│" + background + BlackFg + padded + Reset + "│\r\n")
+		_, err = t.writer.WriteString("│" + indicator + background + BlackFg + padded + Reset + "│\r\n")
 		if err != nil {
 			return err
 		}
@@ -666,7 +684,7 @@ func (t *Terminal) ShowCompletions() error {
 	if err != nil {
 		return err
 	}
-	_, err = t.writer.WriteString("└" + strings.Repeat("─", maxWidth) + "┘")
+	_, err = t.writer.WriteString("└" + strings.Repeat("─", maxWidth+1) + "┘") // +1 for arrow space
 	if err != nil {
 		return err
 	}
